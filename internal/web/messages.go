@@ -42,7 +42,7 @@ func pathInt(r *http.Request, key string) int64 {
 	return id
 }
 func (s *Server) findMessage(r *http.Request, u database.User, administer bool) (database.Message, error) {
-	if route, _, _ := recognize(r.Method, r.URL.EscapedPath()); route != nil && strings.HasPrefix(route.Endpoint, "messages#") && roomID(r) == 0 {
+	if route, _, _ := recognizeRequest(r); route != nil && strings.HasPrefix(route.Endpoint, "messages#") && roomID(r) == 0 {
 		return database.Message{}, sql.ErrNoRows
 	}
 	m, err := s.DB.ReachableMessage(r.Context(), u.ID, pathInt(r, "message"))

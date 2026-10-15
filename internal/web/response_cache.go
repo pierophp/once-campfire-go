@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"container/list"
-	"encoding/json"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/basecamp/once-campfire-go/internal/database"
 	"github.com/basecamp/once-campfire-go/internal/front"
 	"github.com/basecamp/once-campfire-go/internal/responsebody"
 )
@@ -91,10 +92,14 @@ func (s *Server) beginResponseCache(r *http.Request) {
 		return
 	}
 	info.databaseVersion = version
+	// Reads may reuse session and membership rows of this version; writes always query.
+	if r.Method == "GET" || r.Method == "HEAD" {
+		info.snapshot = database.Snapshot{Version: version, Valid: true}
+	}
 	if s.responses.limit == 0 || (r.Method != "GET" && r.Method != "HEAD") || r.ContentLength != 0 || len(r.TransferEncoding) != 0 {
 		return
 	}
-	route, _, err := recognize(r.Method, r.URL.EscapedPath())
+	route, _, err := recognizeRequest(r)
 	if err != nil || route == nil {
 		return
 	}
@@ -120,21 +125,56 @@ func (s *Server) responseHit(r *http.Request) *cachedResponse {
 	if round.flash || round.user == 0 {
 		return nil
 	}
-	version, err := s.DB.ResponseVersion(r.Context())
-	if err != nil || version != round.version {
-		return nil
-	}
-	key, _ := json.Marshal([]any{info.host, info.origin, r.RequestURI, r.URL.RequestURI(), r.Form, round.user,
-		r.Header.Values("Cookie"), r.Header.Values("Accept"), r.Header.Values("Turbo-Frame"),
-		r.UserAgent(), r.Header.Get("Origin"), r.Header.Get("X-Requested-With"), round.gzip,
-		os.Getenv("GIT_REVISION")})
-	round.key = string(key)
+	// The version was observed before authentication; the entry lookup requires
+	// that exact version, so a request that overlaps a commit is ordered before it.
+	round.key = responseKey(r, info, round)
 	if len(round.key) > 8192 {
 		return nil
 	}
-	entry := s.responses.get(round.key, version)
+	entry := s.responses.get(round.key, round.version)
 	round.hit = entry != nil
 	return entry
+}
+func appendField(b []byte, s string) []byte {
+	b = strconv.AppendInt(b, int64(len(s)), 10)
+	b = append(b, ':')
+	return append(b, s...)
+}
+func appendFields(b []byte, values []string) []byte {
+	b = strconv.AppendInt(b, int64(len(values)), 10)
+	b = append(b, '[')
+	for _, value := range values {
+		b = appendField(b, value)
+	}
+	return append(b, ']')
+}
+
+// responseKey length-prefixes every component so distinct requests cannot collide.
+func responseKey(r *http.Request, info *requestInfo, round *responseRound) string {
+	b := make([]byte, 0, 512)
+	b = appendField(b, info.host)
+	b = appendField(b, info.origin)
+	b = appendField(b, r.RequestURI)
+	b = appendField(b, r.URL.RequestURI())
+	names := make([]string, 0, len(r.Form))
+	for name := range r.Form {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		b = appendField(b, name)
+		b = appendFields(b, r.Form[name])
+	}
+	b = strconv.AppendInt(b, round.user, 10)
+	b = appendFields(b, r.Header.Values("Cookie"))
+	b = appendFields(b, r.Header.Values("Accept"))
+	b = appendFields(b, r.Header.Values("Turbo-Frame"))
+	b = appendField(b, r.UserAgent())
+	b = appendField(b, r.Header.Get("Origin"))
+	b = appendField(b, r.Header.Get("X-Requested-With"))
+	b = strconv.AppendBool(b, round.gzip)
+	b = appendField(b, os.Getenv("GIT_REVISION"))
+	return string(b)
 }
 func (entry *cachedResponse) serve(w http.ResponseWriter) {
 	for key, values := range entry.header {

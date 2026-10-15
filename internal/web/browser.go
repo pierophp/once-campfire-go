@@ -20,7 +20,7 @@ func (s *Server) blockBrowser(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	frame := r.Header.Get("Turbo-Frame") != ""
-	if route, _, _ := recognize(r.Method, r.URL.EscapedPath()); route != nil {
+	if route, _, _ := recognizeRequest(r); route != nil {
 		if strings.HasPrefix(route.Endpoint, "messages#") || strings.HasPrefix(route.Endpoint, "messages/by_bots#") {
 			frame = false
 		}

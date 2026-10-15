@@ -15,6 +15,8 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +31,9 @@ type Secrets struct {
 	signedGIDs []byte
 	streams    []byte
 	encryption cipher.AEAD
+
+	verified      sync.Map
+	verifiedCount atomic.Int64
 }
 
 func DeriveKey(secret, salt string, length int) []byte {
@@ -112,6 +117,13 @@ func decode64(s string) ([]byte, error) {
 }
 
 func unpack(data []byte, name string, now time.Time, dest any) error {
+	_, err := unpackExpiry(data, name, now, dest)
+	return err
+}
+
+// unpackExpiry also reports the envelope's expiry, or the zero time when it has none.
+func unpackExpiry(data []byte, name string, now time.Time, dest any) (time.Time, error) {
+	var expires time.Time
 	var obj map[string]json.RawMessage
 	if strings.HasPrefix(string(data), `{"_rails":{"message":`) && json.Unmarshal(data, &obj) == nil && obj["_rails"] != nil {
 		var meta struct {
@@ -120,28 +132,29 @@ func unpack(data []byte, name string, now time.Time, dest any) error {
 			Pur     *string `json:"pur"`
 		}
 		if json.Unmarshal(obj["_rails"], &meta) != nil || meta.Message == nil {
-			return ErrInvalid
+			return expires, ErrInvalid
 		}
 		if meta.Pur != nil && *meta.Pur != "" && *meta.Pur != "cookie."+name {
-			return ErrInvalid
+			return expires, ErrInvalid
 		}
 		if meta.Exp != nil {
 			expiry, err := time.Parse(time.RFC3339Nano, *meta.Exp)
 			if err != nil || !now.Before(expiry) {
-				return ErrInvalid
+				return expires, ErrInvalid
 			}
+			expires = expiry
 		}
 		var err error
 		data, err = decode64(*meta.Message)
 		if err != nil {
-			return ErrInvalid
+			return expires, ErrInvalid
 		}
 	}
 	// Pre-metadata JSON cookies are accepted; Marshal is deliberately never decoded.
 	if err := json.Unmarshal(data, dest); err != nil {
-		return ErrInvalid
+		return expires, ErrInvalid
 	}
-	return nil
+	return expires, nil
 }
 
 func (s *Secrets) SignCookie(name string, value any, expires time.Time) (string, error) {
@@ -216,4 +229,50 @@ func UnescapeCookie(s string) string {
 		return s
 	}
 	return v
+}
+
+type verifiedCookie struct {
+	value   string
+	expires time.Time
+}
+
+const verifiedCookieLimit = 4096
+
+// VerifyStringCookie is VerifyCookie for string payloads. A signature that already
+// verified is remembered, so repeated requests skip the HMAC and JSON decoding; the
+// envelope's expiry is still checked against now on every call.
+func (s *Secrets) VerifyStringCookie(name, raw string, now time.Time) (string, error) {
+	key := name + "\x00" + raw
+	if cached, ok := s.verified.Load(key); ok {
+		entry := cached.(verifiedCookie)
+		if entry.expires.IsZero() || now.Before(entry.expires) {
+			return entry.value, nil
+		}
+		s.verified.Delete(key)
+	}
+	i := len(raw) - 42
+	if i <= 0 || raw[i:i+2] != "--" {
+		return "", ErrInvalid
+	}
+	payload, signature := raw[:i], raw[i+2:]
+	mac := hmac.New(sha1.New, s.signing)
+	mac.Write([]byte(payload))
+	if !hmac.Equal([]byte(signature), []byte(hex.EncodeToString(mac.Sum(nil)))) {
+		return "", ErrInvalid
+	}
+	data, err := decode64(payload)
+	if err != nil {
+		return "", ErrInvalid
+	}
+	var value string
+	expires, err := unpackExpiry(data, name, now, &value)
+	if err != nil {
+		return "", err
+	}
+	if s.verifiedCount.Add(1) > verifiedCookieLimit {
+		s.verified.Clear()
+		s.verifiedCount.Store(1)
+	}
+	s.verified.Store(key, verifiedCookie{value, expires})
+	return value, nil
 }

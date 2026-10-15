@@ -213,11 +213,11 @@ func New(
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	info := &requestInfo{host: r.Host, origin: s.origin(r)}
 	r = r.WithContext(
-		context.WithValue(
-			r.Context(),
-			requestInfoKey{},
-			&requestInfo{host: r.Host, origin: s.origin(r)},
+		database.WithSnapshot(
+			context.WithValue(r.Context(), requestInfoKey{}, info),
+			&info.snapshot,
 		),
 	)
 	if assets.Serve(w, r) {
@@ -264,7 +264,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if route, _, _ := recognize(r.Method, r.URL.EscapedPath()); route != nil && route.bot {
+	if route, _, _ := recognizeRequest(r); route != nil && route.bot {
 		s.routeHTTP(w, r)
 		return
 	}
@@ -533,11 +533,10 @@ func (s *Server) auth(
 		var token string
 		c, err := r.Cookie("session_token")
 		if err == nil {
-			err = s.Secrets.VerifyCookie(
+			token, err = s.Secrets.VerifyStringCookie(
 				"session_token",
 				rails.UnescapeCookie(c.Value),
 				s.DB.Now(),
-				&token,
 			)
 		}
 		if err != nil || token == "" {

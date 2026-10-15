@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -30,6 +31,8 @@ type DB struct {
 	Now                 func() time.Time
 	versionDB           *sql.DB
 	version             *sql.Conn
+	memo                versionMemo
+	observer            versionObserver
 }
 
 func Open(path string, readers int) (*DB, error) {
@@ -189,8 +192,44 @@ func (t timestamp) Scan(value any) error {
 
 // A pinned reader observes commits from every writer, including this process.
 // PRAGMA data_version is connection-local, so it must never use the read pool.
+//
+// Concurrent callers share one query: a caller needs a result from a query that
+// started after it arrived, so it joins the next query rather than one already in
+// flight. Every caller still observes all commits that finished before its call.
 func (d *DB) ResponseVersion(ctx context.Context) (uint64, error) {
-	var version uint64
-	err := d.version.QueryRowContext(ctx, "PRAGMA data_version").Scan(&version)
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	o := &d.observer
+	o.mu.Lock()
+	if o.cond.L == nil {
+		o.cond.L = &o.mu
+	}
+	target := o.started + 1
+	for o.done < target {
+		if o.running {
+			o.cond.Wait()
+			continue
+		}
+		o.running = true
+		o.started = target
+		o.mu.Unlock()
+		var version uint64
+		err := d.version.QueryRowContext(context.Background(), "PRAGMA data_version").Scan(&version)
+		o.mu.Lock()
+		o.value, o.err, o.done, o.running = version, err, target, false
+		o.cond.Broadcast()
+	}
+	version, err := o.value, o.err
+	o.mu.Unlock()
 	return version, err
+}
+
+type versionObserver struct {
+	mu            sync.Mutex
+	cond          sync.Cond
+	started, done uint64
+	running       bool
+	value         uint64
+	err           error
 }

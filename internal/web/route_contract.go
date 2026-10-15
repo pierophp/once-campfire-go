@@ -103,7 +103,7 @@ func (s *Server) routeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.mux.ServeHTTP(w, r)
 		return
 	}
-	route, params, err := recognize(r.Method, r.URL.EscapedPath())
+	route, params, err := recognizeRequest(r)
 	if err != nil {
 		http.Error(w, "Invalid path parameters", 400)
 		return

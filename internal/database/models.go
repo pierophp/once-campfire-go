@@ -83,13 +83,15 @@ func (d *DB) UserByEmail(ctx context.Context, email string) (User, error) {
 }
 
 func (d *DB) SessionUser(ctx context.Context, token string) (User, error) {
-	return userRow(
-		d.Read.QueryRowContext(
-			ctx,
-			"SELECT "+userColumns+" FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND u.status=0",
-			token,
-		),
-	)
+	return memoized(d, ctx, sessionKey{token}, func() (User, error) {
+		return userRow(
+			d.Read.QueryRowContext(
+				ctx,
+				"SELECT "+userColumns+" FROM users u JOIN sessions s ON s.user_id=u.id WHERE s.token=? AND u.status=0",
+				token,
+			),
+		)
+	})
 }
 
 func (d *DB) StartSession(ctx context.Context, user int64, agent, ip string) (string, error) {
@@ -207,10 +209,12 @@ func (d *DB) rooms(ctx context.Context, user int64, visible bool) ([]Room, error
 }
 
 func (d *DB) Room(ctx context.Context, user, id int64) (Room, error) {
-	var r Room
-	err := d.Read.QueryRowContext(ctx, "SELECT r.id,r.creator_id,coalesce(r.name,''),r.type,r.updated_at FROM rooms r JOIN memberships m ON m.room_id=r.id WHERE m.user_id=? AND r.id=?", user, id).
-		Scan(&r.ID, &r.CreatorID, &r.Name, &r.Type, timestamp{&r.UpdatedAt})
-	return r, err
+	return memoized(d, ctx, roomKey{user, id}, func() (Room, error) {
+		var r Room
+		err := d.Read.QueryRowContext(ctx, "SELECT r.id,r.creator_id,coalesce(r.name,''),r.type,r.updated_at FROM rooms r JOIN memberships m ON m.room_id=r.id WHERE m.user_id=? AND r.id=?", user, id).
+			Scan(&r.ID, &r.CreatorID, &r.Name, &r.Type, timestamp{&r.UpdatedAt})
+		return r, err
+	})
 }
 
 const messageSelect = "SELECT m.id,m.room_id,m.creator_id,m.client_message_id,coalesce(t.body,''),coalesce(u.name,''),m.created_at,m.updated_at FROM messages m LEFT JOIN users u ON u.id=m.creator_id LEFT JOIN action_text_rich_texts t ON t.record_type='Message' AND t.record_id=m.id AND t.name='body' "

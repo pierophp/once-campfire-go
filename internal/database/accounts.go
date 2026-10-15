@@ -344,8 +344,12 @@ func (d *DB) BannedIP(ctx context.Context, ip string) (bool, error) {
 
 func (d *DB) RefreshSession(ctx context.Context, token, agent, ip string) (bool, error) {
 	now := d.Now()
-	var active time.Time
-	if err := d.Read.QueryRowContext(ctx, "SELECT last_active_at FROM sessions WHERE token=?", token).Scan(timestamp{&active}); err != nil {
+	active, err := memoized(d, ctx, activityKey{token}, func() (time.Time, error) {
+		var active time.Time
+		err := d.Read.QueryRowContext(ctx, "SELECT last_active_at FROM sessions WHERE token=?", token).Scan(timestamp{&active})
+		return active, err
+	})
+	if err != nil {
 		return false, err
 	}
 	if !active.Before(now.Add(-time.Hour)) {
