@@ -115,6 +115,24 @@ KLOC counts backend code plus executable code in templates; excludes plain HTML,
 
 [Shared verification](https://github.com/basecamp/once-campfire-verification) · [Detailed results](https://github.com/basecamp/once-campfire-verification/blob/main/docs/performance-review.md).
 
+### Go, Rust and Swift in one container runner
+
+Same containers, CPU pinning and load generator for all three (median of 3 runs, requests/sec).
+Separate harness from the table above, so compare only within this table.
+
+| Workload | Go | Rust | Swift |
+|---|---:|---:|---:|
+| Room page | 53,487 | 45,480 | 66,709 |
+| Messages page | 56,289 | 42,352 | 66,530 |
+| Sidebar | 55,615 | 49,579 | 73,476 |
+| Search | 56,900 | 48,124 | 78,173 |
+| Post a message | 2,479 | 2,785 | 3,663 |
+| Peak memory (MB) | 127 | 144 | 174 |
+
+Go's cached reads are answered before the router (`internal/web/cached_read.go`) and memoize session,
+membership and route lookups per SQLite `data_version`. Details and raw runs:
+[`bench/results/trio-go-rust-swift-20261014.md`](bench/results/trio-go-rust-swift-20261014.md).
+
 See [`bench/`](bench/) for benchmark tooling and earlier measurements.
 
 ## Known differences
