@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -54,7 +56,42 @@ func normalizedPath(path string) string {
 	parts := strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
 	return escapedHex.ReplaceAllStringFunc("/"+strings.Join(parts, "/"), strings.ToUpper)
 }
+
+type recognizedRoute struct {
+	route  *routeContract
+	params map[string]string
+}
+
+const recognizedLimit = 4096
+
+var (
+	recognized      sync.Map // method + "\x00" + escaped path -> recognizedRoute
+	recognizedCount atomic.Int64
+)
+
+// recognize memoizes successful matches (hit, miss and unrouted alike): matching walks every
+// contract regexp. The returned params are shared and must be treated as read-only.
 func recognize(method, path string) (*routeContract, map[string]string, error) {
+	if len(path) > 512 {
+		return recognizeUncached(method, path)
+	}
+	key := method + "\x00" + path
+	if cached, ok := recognized.Load(key); ok {
+		entry := cached.(recognizedRoute)
+		return entry.route, entry.params, nil
+	}
+	route, params, err := recognizeUncached(method, path)
+	if err == nil {
+		if recognizedCount.Add(1) > recognizedLimit {
+			recognized.Clear()
+			recognizedCount.Store(1)
+		}
+		recognized.Store(key, recognizedRoute{route, params})
+	}
+	return route, params, err
+}
+
+func recognizeUncached(method, path string) (*routeContract, map[string]string, error) {
 	path = normalizedPath(path)
 	if method == "HEAD" {
 		method = "GET"

@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -13,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 //go:embed schema.sql
@@ -29,8 +30,7 @@ type DB struct {
 	Read                *readPool
 	Write               *sql.DB
 	Now                 func() time.Time
-	versionDB           *sql.DB
-	version             *sql.Conn
+	version             versionReader
 	memo                versionMemo
 	observer            versionObserver
 }
@@ -73,15 +73,8 @@ func Open(path string, readers int) (*DB, error) {
 		r.Close()
 		return fail(err)
 	}
-	v, err := sql.Open("sqlite3", uri+options+"&mode=ro&_query_only=on")
+	version, err := openVersionReader(uri + options + "&mode=ro&_query_only=on")
 	if err != nil {
-		r.Close()
-		return fail(err)
-	}
-	v.SetMaxOpenConns(1)
-	version, err := v.Conn(context.Background())
-	if err != nil {
-		v.Close()
 		r.Close()
 		return fail(err)
 	}
@@ -90,16 +83,15 @@ func Open(path string, readers int) (*DB, error) {
 		frozen, err := time.Parse(time.RFC3339Nano, raw)
 		if err != nil {
 			version.Close()
-			v.Close()
 			r.Close()
 			return fail(err)
 		}
 		now = func() time.Time { return frozen }
 	}
-	return &DB{Read: &readPool{DB: r, statements: make(map[string]*sql.Stmt)}, Write: w, Now: now, versionDB: v, version: version}, nil
+	return &DB{Read: &readPool{DB: r, statements: make(map[string]*sql.Stmt)}, Write: w, Now: now, version: version}, nil
 }
 func (d *DB) Close() error {
-	return errors.Join(d.Read.Close(), d.Write.Close(), d.version.Close(), d.versionDB.Close())
+	return errors.Join(d.Read.Close(), d.Write.Close(), d.version.Close())
 }
 func Stamp(t time.Time) string { return t.UTC().Format("2006-01-02 15:04:05.000000") }
 func (d *DB) Transaction(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -214,8 +206,7 @@ func (d *DB) ResponseVersion(ctx context.Context) (uint64, error) {
 		o.running = true
 		o.started = target
 		o.mu.Unlock()
-		var version uint64
-		err := d.version.QueryRowContext(context.Background(), "PRAGMA data_version").Scan(&version)
+		version, err := d.version.query()
 		o.mu.Lock()
 		o.value, o.err, o.done, o.running = version, err, target, false
 		o.cond.Broadcast()
@@ -232,4 +223,46 @@ type versionObserver struct {
 	running       bool
 	value         uint64
 	err           error
+}
+
+// versionReader owns one read-only SQLite connection for PRAGMA data_version. It talks to the
+// driver directly: database/sql's locking and row allocation cost more than the pragma itself.
+// Only the query's single runner (see ResponseVersion) calls query.
+type versionReader struct {
+	conn driver.Conn
+	stmt driver.Stmt
+	dest []driver.Value
+}
+
+func openVersionReader(dsn string) (versionReader, error) {
+	conn, err := (&sqlite3.SQLiteDriver{}).Open(dsn)
+	if err != nil {
+		return versionReader{}, err
+	}
+	stmt, err := conn.Prepare("PRAGMA data_version")
+	if err != nil {
+		conn.Close()
+		return versionReader{}, err
+	}
+	return versionReader{conn: conn, stmt: stmt, dest: make([]driver.Value, 1)}, nil
+}
+
+func (v versionReader) query() (uint64, error) {
+	rows, err := v.stmt.Query(nil) //nolint:staticcheck // driver.Stmt.Query is the supported path without a context
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	if err = rows.Next(v.dest); err != nil {
+		return 0, err
+	}
+	n, ok := v.dest[0].(int64)
+	if !ok {
+		return 0, fmt.Errorf("unexpected data_version type %T", v.dest[0])
+	}
+	return uint64(n), nil
+}
+
+func (v versionReader) Close() error {
+	return errors.Join(v.stmt.Close(), v.conn.Close())
 }

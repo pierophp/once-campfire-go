@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"sync/atomic"
 
 	"github.com/basecamp/once-campfire-go/internal/database"
 	"github.com/basecamp/once-campfire-go/internal/useragent"
@@ -36,7 +37,7 @@ func requestMetadata(ctx context.Context) *requestInfo {
 func requestAgent(r *http.Request) useragent.Agent {
 	if info := requestMetadata(r.Context()); info != nil {
 		info.agentOnce.Do(func() {
-			agent := useragent.Parse(r.UserAgent())
+			agent := parseAgent(r.UserAgent())
 			info.agent = &agent
 		})
 		return *info.agent
@@ -58,4 +59,29 @@ func recognizeRequest(r *http.Request) (*routeContract, map[string]string, error
 		info.routed, info.routeMethod, info.routePath = true, r.Method, path
 	}
 	return info.route, info.routeParams, info.routeErr
+}
+
+const agentCacheLimit = 1024
+
+var (
+	agents     sync.Map // user agent string -> useragent.Agent
+	agentCount atomic.Int64
+)
+
+// Browsers repeat a handful of User-Agent strings; parsing one costs more than a lookup.
+// Agent values are never modified after Parse returns.
+func parseAgent(raw string) useragent.Agent {
+	if len(raw) > 512 {
+		return useragent.Parse(raw)
+	}
+	if cached, ok := agents.Load(raw); ok {
+		return cached.(useragent.Agent)
+	}
+	agent := useragent.Parse(raw)
+	if agentCount.Add(1) > agentCacheLimit {
+		agents.Clear()
+		agentCount.Store(1)
+	}
+	agents.Store(raw, agent)
+	return agent
 }
