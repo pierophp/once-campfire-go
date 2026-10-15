@@ -342,13 +342,26 @@ func (d *DB) BannedIP(ctx context.Context, ip string) (bool, error) {
 	return n > 0, err
 }
 
-func (d *DB) RefreshSession(ctx context.Context, token, agent, ip string) (bool, error) {
-	now := d.Now()
-	active, err := memoized(d, ctx, activityKey{token}, func() (time.Time, error) {
+func (d *DB) sessionActivity(ctx context.Context, token string) (time.Time, error) {
+	return memoized(d, ctx, activityKey{token}, func() (time.Time, error) {
 		var active time.Time
 		err := d.Read.QueryRowContext(ctx, "SELECT last_active_at FROM sessions WHERE token=?", token).Scan(timestamp{&active})
 		return active, err
 	})
+}
+
+// SessionStale reports whether RefreshSession would write for this session now, without writing.
+func (d *DB) SessionStale(ctx context.Context, token string) (bool, error) {
+	active, err := d.sessionActivity(ctx, token)
+	if err != nil {
+		return false, err
+	}
+	return active.Before(d.Now().Add(-time.Hour)), nil
+}
+
+func (d *DB) RefreshSession(ctx context.Context, token, agent, ip string) (bool, error) {
+	now := d.Now()
+	active, err := d.sessionActivity(ctx, token)
 	if err != nil {
 		return false, err
 	}

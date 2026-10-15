@@ -242,13 +242,30 @@ const verifiedCookieLimit = 4096
 // verified is remembered, so repeated requests skip the HMAC and JSON decoding; the
 // envelope's expiry is still checked against now on every call.
 func (s *Secrets) VerifyStringCookie(name, raw string, now time.Time) (string, error) {
+	return s.verifyString(name, raw, false, now)
+}
+
+// VerifyEscapedStringCookie verifies a cookie value as it arrives in the Cookie header, with
+// the URL escaping Rails applies. The escaped form is the cache key, so a repeat request
+// skips the unescape as well.
+func (s *Secrets) VerifyEscapedStringCookie(name, escaped string, now time.Time) (string, error) {
+	return s.verifyString(name, escaped, true, now)
+}
+
+func (s *Secrets) verifyString(name, raw string, escaped bool, now time.Time) (string, error) {
 	key := name + "\x00" + raw
+	if escaped {
+		key = "e" + key
+	}
 	if cached, ok := s.verified.Load(key); ok {
 		entry := cached.(verifiedCookie)
 		if entry.expires.IsZero() || now.Before(entry.expires) {
 			return entry.value, nil
 		}
 		s.verified.Delete(key)
+	}
+	if escaped {
+		raw = UnescapeCookie(raw)
 	}
 	i := len(raw) - 42
 	if i <= 0 || raw[i:i+2] != "--" {

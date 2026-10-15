@@ -200,5 +200,8 @@ func (s *Server) routeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(route.Endpoint, "messages#") && params["room_id"] == "" {
 		r.SetPathValue("id", "")
 	}
+	if s.cachedRead(w, r, route) {
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }

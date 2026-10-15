@@ -533,9 +533,9 @@ func (s *Server) auth(
 		var token string
 		c, err := r.Cookie("session_token")
 		if err == nil {
-			token, err = s.Secrets.VerifyStringCookie(
+			token, err = s.Secrets.VerifyEscapedStringCookie(
 				"session_token",
-				rails.UnescapeCookie(c.Value),
+				c.Value,
 				s.DB.Now(),
 			)
 		}
